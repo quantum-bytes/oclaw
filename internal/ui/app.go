@@ -1,0 +1,850 @@
+package ui
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/quantum-bytes/oclaw/internal/chat"
+	"github.com/quantum-bytes/oclaw/internal/config"
+	"github.com/quantum-bytes/oclaw/internal/gateway"
+)
+
+// View mode for the app.
+type viewMode int
+
+const (
+	viewChat viewMode = iota
+	viewAgentPicker
+	viewSessionPicker
+	viewHelp
+)
+
+// App is the root bubbletea model.
+type App struct {
+	cfg    *config.Config
+	client *gateway.Client
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// UI state
+	width  int
+	height int
+	mode   viewMode
+
+	// Chat
+	viewport   viewport.Model
+	input      textarea.Model
+	messages   []chatMessage
+	streaming  bool
+	assembler  *chat.StreamAssembler
+	currentRun string
+	showThink  bool
+
+	// Agent/Session
+	currentAgent   string
+	currentSession string
+	agents         []gateway.AgentInfo
+	sessions       []gateway.SessionInfo
+	pickerCursor   int
+
+	// Connection
+	connected    bool
+	reconnecting bool
+	statusMsg    string
+}
+
+type chatMessage struct {
+	role     string // "user", "assistant", "system"
+	text     string
+	thinking string
+	tools    []string
+}
+
+// Bubbletea messages
+type gatewayConnectedMsg struct{}
+type gatewayDisconnectedMsg struct{}
+type gatewayEventMsg struct{ event *gateway.EventFrame }
+type agentsLoadedMsg struct{ agents []gateway.AgentInfo }
+type historyLoadedMsg struct{ messages []gateway.HistoryMessage }
+type sessionsLoadedMsg struct{ sessions []gateway.SessionInfo }
+type chatSentMsg struct{ err error }
+type sessionResetMsg struct{ err error }
+type errMsg struct{ err error }
+
+// NewApp creates a new App model.
+func NewApp(cfg *config.Config) *App {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	ta := textarea.New()
+	ta.Placeholder = "Type a message..."
+	ta.Prompt = "│ "
+	ta.CharLimit = 0
+	ta.SetWidth(80)
+	ta.SetHeight(3)
+	ta.Focus()
+	ta.ShowLineNumbers = false
+
+	vp := viewport.New(80, 20)
+
+	client := gateway.NewClient(cfg.GatewayURL, cfg.Token)
+
+	app := &App{
+		cfg:            cfg,
+		client:         client,
+		ctx:            ctx,
+		cancel:         cancel,
+		viewport:       vp,
+		input:          ta,
+		assembler:      chat.NewStreamAssembler(),
+		showThink:      true,
+		currentAgent:   cfg.AgentID,
+		currentSession: fmt.Sprintf("agent:%s:main", cfg.AgentID),
+	}
+
+	client.OnConnect(func() {})
+	client.OnDisconnect(func() {})
+
+	return app
+}
+
+func (a *App) Init() tea.Cmd {
+	return tea.Batch(
+		textarea.Blink,
+		a.connectGateway(),
+	)
+}
+
+func (a *App) connectGateway() tea.Cmd {
+	return func() tea.Msg {
+		go func() {
+			_ = a.client.Connect(a.ctx)
+		}()
+
+		// Poll until connected or timeout
+		for i := 0; i < 100; i++ {
+			if a.client.Connected() {
+				return gatewayConnectedMsg{}
+			}
+			select {
+			case <-a.ctx.Done():
+				return gatewayDisconnectedMsg{}
+			default:
+			}
+			// Brief yield
+			select {
+			case <-a.ctx.Done():
+				return gatewayDisconnectedMsg{}
+			case <-timeAfter(50):
+			}
+		}
+		return gatewayDisconnectedMsg{}
+	}
+}
+
+func timeAfter(ms int) <-chan struct{} {
+	ch := make(chan struct{})
+	go func() {
+		<-time.After(time.Duration(ms) * time.Millisecond)
+		close(ch)
+	}()
+	return ch
+}
+
+func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		a.width = msg.Width
+		a.height = msg.Height
+		a.updateLayout()
+
+	case tea.KeyMsg:
+		cmd := a.handleKey(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+
+	case gatewayConnectedMsg:
+		a.connected = true
+		a.reconnecting = false
+		a.statusMsg = ""
+		cmds = append(cmds, a.loadAgents(), a.loadHistory(), a.listenEvents())
+
+	case gatewayDisconnectedMsg:
+		a.connected = false
+		a.reconnecting = true
+		a.statusMsg = "reconnecting..."
+
+	case gatewayEventMsg:
+		cmd := a.handleEvent(msg.event)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		cmds = append(cmds, a.listenEvents())
+
+	case agentsLoadedMsg:
+		a.agents = msg.agents
+
+	case historyLoadedMsg:
+		a.messages = nil
+		for _, m := range msg.messages {
+			a.messages = append(a.messages, chatMessage{
+				role:     m.Role,
+				text:     chat.ExtractText(m.Content),
+				thinking: chat.ExtractThinking(m.Content),
+				tools:    chat.ExtractToolCalls(m.Content),
+			})
+		}
+		a.renderChat()
+		a.viewport.GotoBottom()
+
+	case sessionsLoadedMsg:
+		a.sessions = msg.sessions
+
+	case chatSentMsg:
+		if msg.err != nil {
+			a.statusMsg = fmt.Sprintf("send error: %v", msg.err)
+			a.streaming = false
+		}
+
+	case sessionResetMsg:
+		if msg.err != nil {
+			a.statusMsg = fmt.Sprintf("reset error: %v", msg.err)
+		} else {
+			a.messages = nil
+			a.renderChat()
+			a.statusMsg = "session reset"
+		}
+
+	case errMsg:
+		a.statusMsg = fmt.Sprintf("error: %v", msg.err)
+	}
+
+	// Update textarea if in chat mode and not in overlay
+	if a.mode == viewChat {
+		var cmd tea.Cmd
+		a.input, cmd = a.input.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
+	return a, tea.Batch(cmds...)
+}
+
+func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
+	// Global keys
+	switch {
+	case msg.String() == "ctrl+d":
+		a.cancel()
+		a.client.Close()
+		return tea.Quit
+
+	case msg.String() == "ctrl+c":
+		if a.streaming {
+			if a.currentRun != "" {
+				go a.client.AbortChat(a.currentSession, a.currentRun)
+			}
+			a.streaming = false
+			a.assembler.Reset()
+			a.statusMsg = "aborted"
+			return nil
+		}
+		a.cancel()
+		a.client.Close()
+		return tea.Quit
+
+	case msg.String() == "esc":
+		if a.mode != viewChat {
+			a.mode = viewChat
+			a.pickerCursor = 0
+			return nil
+		}
+
+	case msg.String() == "ctrl+a":
+		if a.mode == viewAgentPicker {
+			a.mode = viewChat
+		} else {
+			a.mode = viewAgentPicker
+			a.pickerCursor = 0
+		}
+		return nil
+
+	case msg.String() == "ctrl+s":
+		if a.mode == viewSessionPicker {
+			a.mode = viewChat
+		} else {
+			a.mode = viewSessionPicker
+			a.pickerCursor = 0
+			return a.loadSessions()
+		}
+		return nil
+
+	case msg.String() == "ctrl+n":
+		return a.resetSession()
+
+	case msg.String() == "ctrl+t":
+		a.showThink = !a.showThink
+		a.renderChat()
+		return nil
+
+	case msg.String() == "ctrl+/":
+		if a.mode == viewHelp {
+			a.mode = viewChat
+		} else {
+			a.mode = viewHelp
+		}
+		return nil
+	}
+
+	// Overlay-specific keys
+	if a.mode == viewAgentPicker {
+		return a.handleAgentPickerKey(msg)
+	}
+	if a.mode == viewSessionPicker {
+		return a.handleSessionPickerKey(msg)
+	}
+	if a.mode == viewHelp {
+		if msg.String() == "q" || msg.String() == "esc" {
+			a.mode = viewChat
+		}
+		return nil
+	}
+
+	// Chat mode keys
+	if a.mode == viewChat {
+		switch msg.String() {
+		case "enter":
+			if a.streaming {
+				return nil
+			}
+			text := strings.TrimSpace(a.input.Value())
+			if text == "" {
+				return nil
+			}
+
+			// Handle slash commands
+			if strings.HasPrefix(text, "/") {
+				cmd := a.handleSlashCommand(text)
+				a.input.Reset()
+				return cmd
+			}
+
+			a.input.Reset()
+			a.messages = append(a.messages, chatMessage{role: "user", text: text})
+			a.renderChat()
+			a.viewport.GotoBottom()
+			a.streaming = true
+			a.assembler.Reset()
+			a.statusMsg = ""
+			return a.sendMessage(text)
+		}
+	}
+
+	return nil
+}
+
+func (a *App) handleSlashCommand(text string) tea.Cmd {
+	parts := strings.Fields(text)
+	cmd := parts[0]
+
+	switch cmd {
+	case "/agent":
+		if len(parts) > 1 {
+			return a.switchAgent(parts[1])
+		}
+		a.mode = viewAgentPicker
+		a.pickerCursor = 0
+		return nil
+
+	case "/session", "/sessions":
+		a.mode = viewSessionPicker
+		a.pickerCursor = 0
+		return a.loadSessions()
+
+	case "/new", "/reset":
+		return a.resetSession()
+
+	case "/think":
+		if len(parts) > 1 {
+			a.statusMsg = "thinking: " + parts[1]
+		}
+		return nil
+
+	case "/quit", "/exit":
+		a.cancel()
+		a.client.Close()
+		return tea.Quit
+
+	case "/help":
+		a.mode = viewHelp
+		return nil
+
+	default:
+		a.statusMsg = fmt.Sprintf("unknown command: %s", cmd)
+		return nil
+	}
+}
+
+func (a *App) handleAgentPickerKey(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "up", "k":
+		if a.pickerCursor > 0 {
+			a.pickerCursor--
+		}
+	case "down", "j":
+		if a.pickerCursor < len(a.agents)-1 {
+			a.pickerCursor++
+		}
+	case "enter":
+		if a.pickerCursor < len(a.agents) {
+			agent := a.agents[a.pickerCursor]
+			a.mode = viewChat
+			return a.switchAgent(agent.ID)
+		}
+	}
+	return nil
+}
+
+func (a *App) handleSessionPickerKey(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "up", "k":
+		if a.pickerCursor > 0 {
+			a.pickerCursor--
+		}
+	case "down", "j":
+		if a.pickerCursor < len(a.sessions)-1 {
+			a.pickerCursor++
+		}
+	case "enter":
+		if a.pickerCursor < len(a.sessions) {
+			session := a.sessions[a.pickerCursor]
+			a.currentSession = session.Key
+			a.mode = viewChat
+			return a.loadHistory()
+		}
+	}
+	return nil
+}
+
+func (a *App) handleEvent(evt *gateway.EventFrame) tea.Cmd {
+	if evt.Event != "chat" {
+		return nil
+	}
+
+	var chatEvt chat.ChatEventPayload
+	if err := json.Unmarshal(evt.Payload, &chatEvt); err != nil {
+		return nil
+	}
+
+	// Only handle events for our current session
+	if chatEvt.SessionKey != a.currentSession {
+		return nil
+	}
+
+	delta := a.assembler.HandleEvent(chatEvt)
+	a.currentRun = delta.RunID
+
+	switch delta.State {
+	case chat.StreamActive:
+		// Update streaming message
+		a.updateStreamingMessage(delta)
+		a.renderChat()
+		a.viewport.GotoBottom()
+
+	case chat.StreamFinal:
+		a.streaming = false
+		a.updateStreamingMessage(delta)
+		a.renderChat()
+		a.viewport.GotoBottom()
+		a.currentRun = ""
+
+	case chat.StreamAborted:
+		a.streaming = false
+		a.statusMsg = "response aborted"
+		a.currentRun = ""
+
+	case chat.StreamError:
+		a.streaming = false
+		a.statusMsg = fmt.Sprintf("error: %s", delta.Error)
+		a.currentRun = ""
+	}
+
+	return nil
+}
+
+func (a *App) updateStreamingMessage(delta chat.StreamDelta) {
+	// Find or create the assistant message being streamed
+	if len(a.messages) == 0 || a.messages[len(a.messages)-1].role != "assistant" {
+		a.messages = append(a.messages, chatMessage{role: "assistant"})
+	}
+
+	last := &a.messages[len(a.messages)-1]
+	last.text = delta.Text
+	last.thinking = delta.Thinking
+	last.tools = delta.Tools
+}
+
+// Commands
+
+func (a *App) sendMessage(text string) tea.Cmd {
+	return func() tea.Msg {
+		_, err := a.client.SendChat(a.currentSession, text, "", 0)
+		return chatSentMsg{err: err}
+	}
+}
+
+func (a *App) loadAgents() tea.Cmd {
+	return func() tea.Msg {
+		agents, err := a.client.ListAgents()
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return agentsLoadedMsg{agents: agents}
+	}
+}
+
+func (a *App) loadHistory() tea.Cmd {
+	return func() tea.Msg {
+		messages, err := a.client.LoadHistory(a.currentSession, 50)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return historyLoadedMsg{messages: messages}
+	}
+}
+
+func (a *App) loadSessions() tea.Cmd {
+	return func() tea.Msg {
+		sessions, err := a.client.ListSessions(gateway.SessionsListParams{
+			Limit:               20,
+			AgentID:             a.currentAgent,
+			IncludeDerivedTitle: true,
+			IncludeLastMessage:  true,
+		})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return sessionsLoadedMsg{sessions: sessions}
+	}
+}
+
+func (a *App) switchAgent(agentID string) tea.Cmd {
+	a.currentAgent = agentID
+	a.currentSession = fmt.Sprintf("agent:%s:main", agentID)
+	a.messages = nil
+	a.renderChat()
+	return a.loadHistory()
+}
+
+func (a *App) resetSession() tea.Cmd {
+	return func() tea.Msg {
+		err := a.client.ResetSession(a.currentSession, "user_reset")
+		return sessionResetMsg{err: err}
+	}
+}
+
+func (a *App) listenEvents() tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case evt, ok := <-a.client.Events():
+			if !ok {
+				return gatewayDisconnectedMsg{}
+			}
+			return gatewayEventMsg{event: evt}
+		case <-a.ctx.Done():
+			return nil
+		}
+	}
+}
+
+// Layout
+
+func (a *App) updateLayout() {
+	headerHeight := 1
+	statusHeight := 1
+	inputHeight := 3
+	borderLines := 2 // borders between sections
+
+	chatHeight := a.height - headerHeight - statusHeight - inputHeight - borderLines
+	if chatHeight < 1 {
+		chatHeight = 1
+	}
+
+	a.viewport.Width = a.width
+	a.viewport.Height = chatHeight
+	a.input.SetWidth(a.width - 2)
+
+	a.renderChat()
+}
+
+func (a *App) renderChat() {
+	var sb strings.Builder
+
+	for _, msg := range a.messages {
+		switch msg.role {
+		case "user":
+			sb.WriteString(userLabelStyle.Render("You") + "\n")
+			sb.WriteString(msg.text + "\n\n")
+
+		case "assistant":
+			agentName := a.currentAgent
+			for _, ag := range a.agents {
+				if ag.ID == a.currentAgent {
+					agentName = ag.Name
+					break
+				}
+			}
+
+			if a.showThink && msg.thinking != "" {
+				sb.WriteString(thinkingLabelStyle.Render(agentName+" (thinking)") + "\n")
+				sb.WriteString(thinkingTextStyle.Render(msg.thinking) + "\n\n")
+			}
+
+			if len(msg.tools) > 0 {
+				for _, t := range msg.tools {
+					sb.WriteString(dimStyle().Render("  ⚙ "+t) + "\n")
+				}
+			}
+
+			if msg.text != "" {
+				sb.WriteString(assistantLabelStyle.Render(agentName) + "\n")
+				rendered := RenderMarkdown(msg.text)
+				sb.WriteString(rendered + "\n")
+			}
+
+		case "system":
+			sb.WriteString(dimStyle().Render(msg.text) + "\n\n")
+		}
+	}
+
+	if a.streaming && (len(a.messages) == 0 || a.messages[len(a.messages)-1].text == "") {
+		sb.WriteString(spinnerStyle.Render("⠋ ") + thinkingLabelStyle.Render("thinking...") + "\n")
+	}
+
+	a.viewport.SetContent(sb.String())
+}
+
+func dimStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(dimColor)
+}
+
+// View
+
+func (a *App) View() string {
+	if a.width == 0 {
+		return "Loading..."
+	}
+
+	header := a.renderHeader()
+	status := a.renderStatusBar()
+
+	// Main content depends on mode
+	var content string
+	switch a.mode {
+	case viewAgentPicker:
+		content = a.renderAgentPicker()
+	case viewSessionPicker:
+		content = a.renderSessionPicker()
+	case viewHelp:
+		content = a.renderHelp()
+	default:
+		content = a.viewport.View()
+	}
+
+	inputBorder := lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder(), true, false, false, false).
+		BorderForeground(dimColor).
+		Width(a.width)
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		header,
+		content,
+		inputBorder.Render(a.input.View()),
+		status,
+	)
+}
+
+func (a *App) renderHeader() string {
+	title := headerStyle.Render(" oclaw ")
+
+	agentName := a.currentAgent
+	agentModel := ""
+	for _, ag := range a.agents {
+		if ag.ID == a.currentAgent {
+			agentName = ag.Name
+			agentModel = ag.Model
+			break
+		}
+	}
+	// Fall back to config agents if gateway agents not loaded
+	if agentModel == "" {
+		if ac := a.cfg.FindAgent(a.currentAgent); ac != nil {
+			agentName = ac.Name
+			agentModel = ac.Model
+		}
+	}
+
+	agentInfo := headerAgentStyle.Render(fmt.Sprintf(" %s (%s) ", agentName, agentModel))
+
+	sessionLabel := headerAgentStyle.Render(fmt.Sprintf(" session: %s ", a.sessionLabel()))
+
+	padding := a.width - lipgloss.Width(title) - lipgloss.Width(agentInfo) - lipgloss.Width(sessionLabel)
+	if padding < 0 {
+		padding = 0
+	}
+
+	return lipgloss.NewStyle().
+		Background(accentColor).
+		Width(a.width).
+		Render(title + agentInfo + strings.Repeat(" ", padding) + sessionLabel)
+}
+
+func (a *App) sessionLabel() string {
+	parts := strings.Split(a.currentSession, ":")
+	if len(parts) >= 3 {
+		return parts[2]
+	}
+	return a.currentSession
+}
+
+func (a *App) renderStatusBar() string {
+	var connStatus string
+	if a.connected {
+		connStatus = statusConnectedStyle.Render("● connected")
+	} else if a.reconnecting {
+		connStatus = statusReconnectingStyle.Render("○ reconnecting...")
+	} else {
+		connStatus = statusDisconnectedStyle.Render("● disconnected")
+	}
+
+	agent := a.currentAgent
+	hints := helpKeyStyle.Render("ctrl+/") + helpDescStyle.Render(" help")
+
+	status := connStatus + "  │  " + agent + "  │  " + hints
+
+	if a.statusMsg != "" {
+		status += "  │  " + dimStyle().Render(a.statusMsg)
+	}
+
+	return statusBarStyle.Width(a.width).Render(status)
+}
+
+func (a *App) renderAgentPicker() string {
+	var sb strings.Builder
+	sb.WriteString(overlayTitleStyle.Render("Switch Agent") + "\n\n")
+
+	for i, agent := range a.agents {
+		label := fmt.Sprintf("%s (%s) — %s", agent.Name, agent.ID, agent.Model)
+		if i == a.pickerCursor {
+			sb.WriteString(overlaySelectedStyle.Render("▸ "+label) + "\n")
+		} else {
+			sb.WriteString(overlayItemStyle.Render("  "+label) + "\n")
+		}
+	}
+
+	// If no agents loaded from gateway, show config agents
+	if len(a.agents) == 0 {
+		for i, agent := range a.cfg.Agents {
+			label := fmt.Sprintf("%s (%s) — %s", agent.Name, agent.ID, agent.Model)
+			if i == a.pickerCursor {
+				sb.WriteString(overlaySelectedStyle.Render("▸ "+label) + "\n")
+			} else {
+				sb.WriteString(overlayItemStyle.Render("  "+label) + "\n")
+			}
+		}
+	}
+
+	sb.WriteString("\n" + dimStyle().Render("↑/↓ navigate  enter select  esc cancel"))
+	return sb.String()
+}
+
+func (a *App) renderSessionPicker() string {
+	var sb strings.Builder
+	sb.WriteString(overlayTitleStyle.Render("Sessions") + "\n\n")
+
+	if len(a.sessions) == 0 {
+		sb.WriteString(dimStyle().Render("  No sessions found") + "\n")
+	}
+
+	for i, session := range a.sessions {
+		title := session.Title
+		if title == "" {
+			title = session.Key
+		}
+		label := title
+		if ts := session.UpdatedAtString(); ts != "" {
+			label += "  " + dimStyle().Render(ts)
+		}
+
+		if i == a.pickerCursor {
+			sb.WriteString(overlaySelectedStyle.Render("▸ "+label) + "\n")
+		} else {
+			sb.WriteString(overlayItemStyle.Render("  "+label) + "\n")
+		}
+	}
+
+	sb.WriteString("\n" + dimStyle().Render("↑/↓ navigate  enter select  esc cancel"))
+	return sb.String()
+}
+
+func (a *App) renderHelp() string {
+	var sb strings.Builder
+	sb.WriteString(overlayTitleStyle.Render("Keyboard Shortcuts") + "\n\n")
+
+	bindings := []struct {
+		key  string
+		desc string
+	}{
+		{"enter", "Send message"},
+		{"shift+enter", "New line in input"},
+		{"ctrl+c", "Abort response / quit"},
+		{"ctrl+d", "Quit"},
+		{"ctrl+a", "Switch agent"},
+		{"ctrl+s", "Browse sessions"},
+		{"ctrl+n", "New session"},
+		{"ctrl+t", "Toggle thinking text"},
+		{"ctrl+/", "This help"},
+		{"esc", "Close overlay"},
+	}
+
+	for _, b := range bindings {
+		sb.WriteString(fmt.Sprintf("  %s  %s\n",
+			helpKeyStyle.Width(14).Render(b.key),
+			helpDescStyle.Render(b.desc),
+		))
+	}
+
+	sb.WriteString("\n" + overlayTitleStyle.Render("Slash Commands") + "\n\n")
+
+	commands := []struct {
+		cmd  string
+		desc string
+	}{
+		{"/agent <id>", "Switch to agent"},
+		{"/session", "Browse sessions"},
+		{"/new", "Reset session"},
+		{"/think <level>", "Set thinking level"},
+		{"/help", "Show help"},
+		{"/quit", "Quit"},
+	}
+
+	for _, c := range commands {
+		sb.WriteString(fmt.Sprintf("  %s  %s\n",
+			helpKeyStyle.Width(16).Render(c.cmd),
+			helpDescStyle.Render(c.desc),
+		))
+	}
+
+	sb.WriteString("\n" + dimStyle().Render("Press esc or q to close"))
+	return sb.String()
+}
