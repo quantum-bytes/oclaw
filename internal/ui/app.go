@@ -434,10 +434,10 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		case "pgdown":
 			a.viewport.ViewDown()
 			return nil, true
-		case "home":
+		case "ctrl+home":
 			a.viewport.GotoTop()
 			return nil, true
-		case "end":
+		case "ctrl+end":
 			a.viewport.GotoBottom()
 			return nil, true
 		case "enter":
@@ -1178,7 +1178,7 @@ func (a *App) renderHelp() string {
 	}{
 		{"enter", "Send message"},
 		{"shift+enter", "New line in input"},
-		{"ctrl+c", "Abort response / quit"},
+		{"ctrl+c", "Clear input / quit"},
 		{"ctrl+d", "Quit"},
 		{"ctrl+a", "Switch agent"},
 		{"ctrl+s", "Browse sessions"},
@@ -1186,6 +1186,10 @@ func (a *App) renderHelp() string {
 		{"ctrl+t", "Toggle thinking text"},
 		{"ctrl+/", "This help"},
 		{"esc", "Close overlay"},
+		{"pgup/pgdn", "Scroll chat"},
+		{"ctrl+home", "Top of chat"},
+		{"ctrl+end", "Bottom of chat"},
+		{"home/end", "Cursor start/end"},
 	}
 
 	for _, b := range bindings {
