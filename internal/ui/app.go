@@ -65,6 +65,7 @@ type App struct {
 	thinkingTicks     int       // counts ticks to rotate message every ~30 ticks (3s)
 	lastCtrlC         time.Time // for double ctrl+c to quit
 	receivedChatEvent bool      // true if we got a chat delta/final for current run
+	lastCompletedRun  string    // runId of last completed chat (dedup finals)
 	debugLog          *os.File  // debug event log
 }
 
@@ -690,6 +691,12 @@ func (a *App) handleChatEvent(evt *gateway.EventFrame) tea.Cmd {
 		}
 
 	case "final":
+		// Deduplicate: gateway can send multiple finals for the same run
+		if payload.RunID != "" && payload.RunID == a.lastCompletedRun {
+			return nil
+		}
+		a.lastCompletedRun = payload.RunID
+
 		// Response complete
 		a.streaming = false
 		a.currentRun = ""
