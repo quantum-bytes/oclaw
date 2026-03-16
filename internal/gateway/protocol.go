@@ -58,8 +58,18 @@ type ConnectParams struct {
 	Client      ClientInfo             `json:"client"`
 	Caps        []string               `json:"caps"`
 	Auth        map[string]interface{} `json:"auth"`
+	Device      *DeviceInfo            `json:"device,omitempty"`
 	Role        string                 `json:"role"`
 	Scopes      []string               `json:"scopes"`
+}
+
+// DeviceInfo contains the Ed25519 device identity for authentication.
+type DeviceInfo struct {
+	ID        string `json:"id"`
+	PublicKey string `json:"publicKey"`
+	Signature string `json:"signature"`
+	SignedAt  int64  `json:"signedAt"`
+	Nonce     string `json:"nonce"`
 }
 
 // ClientInfo identifies this TUI client to the gateway.

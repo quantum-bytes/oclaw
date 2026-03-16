@@ -2,10 +2,17 @@ package gateway
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -233,6 +240,11 @@ func (c *Client) sendConnect(nonce string) (*HelloPayload, error) {
 		},
 		Role:   "operator",
 		Scopes: []string{"operator.admin", "operator.read", "operator.write"},
+	}
+
+	// Load device identity for Ed25519 signing (grants write scopes)
+	if device, err := loadDeviceIdentity(nonce, c.token); err == nil {
+		params.Device = device
 	}
 
 	// Send connect request directly (readLoop not running yet)
@@ -577,4 +589,65 @@ func (c *Client) Close() {
 		c.conn.Close()
 	}
 	c.connMu.Unlock()
+}
+
+// deviceIdentityFile is the structure of ~/.openclaw/identity/device.json.
+type deviceIdentityFile struct {
+	DeviceID      string `json:"deviceId"`
+	PublicKeyPem  string `json:"publicKeyPem"`
+	PrivateKeyPem string `json:"privateKeyPem"`
+}
+
+// loadDeviceIdentity loads the Ed25519 device key and signs the nonce.
+func loadDeviceIdentity(nonce, token string) (*DeviceInfo, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+
+	path := filepath.Join(home, ".openclaw", "identity", "device.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var identity deviceIdentityFile
+	if err := json.Unmarshal(data, &identity); err != nil {
+		return nil, err
+	}
+
+	// Parse private key
+	block, _ := pem.Decode([]byte(identity.PrivateKeyPem))
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode private key PEM")
+	}
+
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+
+	privKey, ok := key.(ed25519.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("not an Ed25519 key")
+	}
+
+	// Extract raw 32-byte Ed25519 public key from the private key
+	rawPubKey := privKey.Public().(ed25519.PublicKey)
+
+	// Sign payload: v3|deviceId|clientId|clientMode|role|scopes|signedAtMs|token|nonce|platform|deviceFamily
+	signedAt := time.Now().UnixMilli()
+	scopes := "operator.admin,operator.read,operator.write"
+	platform := strings.ToLower(runtime.GOOS)
+	payload := fmt.Sprintf("v3|%s|cli|cli|operator|%s|%d|%s|%s|%s|",
+		identity.DeviceID, scopes, signedAt, token, nonce, platform)
+	signature := ed25519.Sign(privKey, []byte(payload))
+
+	return &DeviceInfo{
+		ID:        identity.DeviceID,
+		PublicKey: base64.RawURLEncoding.EncodeToString(rawPubKey),
+		Signature: base64.RawURLEncoding.EncodeToString(signature),
+		SignedAt:  signedAt,
+		Nonce:     nonce,
+	}, nil
 }
