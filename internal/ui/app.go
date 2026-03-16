@@ -61,7 +61,8 @@ type App struct {
 	statusMsg      string
 	spinnerIdx     int
 	thinkingMsgIdx int
-	thinkingTicks  int // counts ticks to rotate message every ~30 ticks (3s)
+	thinkingTicks  int       // counts ticks to rotate message every ~30 ticks (3s)
+	lastCtrlC      time.Time // for double ctrl+c to quit
 }
 
 type chatMessage struct {
@@ -311,6 +312,9 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		return tea.Quit, true
 
 	case msg.String() == "ctrl+c":
+		now := time.Now()
+
+		// If streaming, first ctrl+c aborts the stream
 		if a.streaming {
 			if a.currentRun != "" {
 				go a.client.AbortChat(a.currentSession, a.currentRun)
@@ -318,11 +322,29 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 			a.streaming = false
 			a.assembler.Reset()
 			a.statusMsg = "aborted"
+			a.lastCtrlC = now
 			return nil, true
 		}
-		a.cancel()
-		a.client.Close()
-		return tea.Quit, true
+
+		// Double ctrl+c within 1.5s — quit
+		if !a.lastCtrlC.IsZero() && now.Sub(a.lastCtrlC) < 1500*time.Millisecond {
+			a.cancel()
+			a.client.Close()
+			return tea.Quit, true
+		}
+
+		// First ctrl+c — clear the input box
+		if strings.TrimSpace(a.input.Value()) != "" {
+			a.input.Reset()
+			a.statusMsg = ""
+			a.lastCtrlC = now
+			return nil, true
+		}
+
+		// Input already empty — record and show hint
+		a.lastCtrlC = now
+		a.statusMsg = "press ctrl+c again to quit"
+		return nil, true
 
 	case msg.String() == "esc":
 		if a.mode != viewChat {
