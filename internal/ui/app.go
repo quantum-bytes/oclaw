@@ -831,7 +831,7 @@ func (a *App) switchAgent(agentID string) tea.Cmd {
 
 func (a *App) resetSession() tea.Cmd {
 	return func() tea.Msg {
-		err := a.client.ResetSession(a.currentSession, "user_reset")
+		err := a.client.ResetSession(a.currentSession, "new")
 		return sessionResetMsg{err: err}
 	}
 }
