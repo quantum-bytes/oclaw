@@ -82,8 +82,9 @@ type gatewayDisconnectedMsg struct{}
 type gatewayEventMsg struct{ event *gateway.EventFrame }
 type agentsLoadedMsg struct{ agents []gateway.AgentInfo }
 type historyLoadedMsg struct {
-	messages []gateway.HistoryMessage
-	fullLoad bool // true = replace all messages, false = append latest response
+	messages   []gateway.HistoryMessage
+	fullLoad   bool   // true = replace all messages, false = append latest response
+	sessionKey string // session this fetch was for (discard if stale)
 }
 type sessionsLoadedMsg struct{ sessions []gateway.SessionInfo }
 type chatSentMsg struct{ err error }
@@ -124,9 +125,12 @@ func NewApp(cfg *config.Config) *App {
 	client.OnConnect(func() {})
 	client.OnDisconnect(func() {})
 
-	// Debug log
-	if f, err := os.Create("/tmp/oclaw-debug.log"); err == nil {
-		app.debugLog = f
+	// Debug log — only when OCLAW_DEBUG=1
+	if os.Getenv("OCLAW_DEBUG") == "1" {
+		if f, err := os.CreateTemp("", "oclaw-debug-*.log"); err == nil {
+			os.Chmod(f.Name(), 0600)
+			app.debugLog = f
+		}
 	}
 
 	return app
@@ -232,6 +236,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case gatewayDisconnectedMsg:
 		a.connected = false
 		a.reconnecting = true
+		a.resetStreamState()
 		a.statusMsg = "reconnecting..."
 
 	case gatewayEventMsg:
@@ -245,6 +250,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.agents = msg.agents
 
 	case historyLoadedMsg:
+		// Discard stale history fetches from a different session
+		if msg.sessionKey != "" && msg.sessionKey != a.currentSession {
+			break
+		}
 		if msg.fullLoad {
 			// Full history load (initial connect or agent switch)
 			a.messages = nil
@@ -286,6 +295,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.statusMsg = fmt.Sprintf("reset error: %v", msg.err)
 		} else {
 			a.messages = nil
+			a.resetStreamState()
 			a.renderChat()
 			a.statusMsg = "session reset"
 		}
@@ -329,6 +339,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	// Global keys — always handled (not forwarded to textarea)
 	switch {
 	case msg.String() == "ctrl+d":
+		a.closeDebugLog()
 		a.cancel()
 		a.client.Close()
 		return tea.Quit, true
@@ -350,6 +361,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 
 		// Double ctrl+c within 1.5s — quit
 		if !a.lastCtrlC.IsZero() && now.Sub(a.lastCtrlC) < 1500*time.Millisecond {
+			a.closeDebugLog()
 			a.cancel()
 			a.client.Close()
 			return tea.Quit, true
@@ -506,6 +518,7 @@ func (a *App) handleSlashCommand(text string) tea.Cmd {
 		return a.saveMemory()
 
 	case "/quit", "/exit":
+		a.closeDebugLog()
 		a.cancel()
 		a.client.Close()
 		return tea.Quit
@@ -752,12 +765,13 @@ func (a *App) handleChatEvent(evt *gateway.EventFrame) tea.Cmd {
 
 // fetchLatestResponse loads history and appends the latest assistant message.
 func (a *App) fetchLatestResponse() tea.Cmd {
+	session := a.currentSession
 	return func() tea.Msg {
-		messages, err := a.client.LoadHistory(a.currentSession, 2)
+		messages, err := a.client.LoadHistory(session, 2)
 		if err != nil {
 			return errMsg{err: fmt.Errorf("fetch response: %w", err)}
 		}
-		return historyLoadedMsg{messages: messages}
+		return historyLoadedMsg{messages: messages, sessionKey: session}
 	}
 }
 
@@ -799,12 +813,13 @@ func (a *App) loadAgents() tea.Cmd {
 }
 
 func (a *App) loadHistory() tea.Cmd {
+	session := a.currentSession
 	return func() tea.Msg {
-		messages, err := a.client.LoadHistory(a.currentSession, 50)
+		messages, err := a.client.LoadHistory(session, 50)
 		if err != nil {
 			return errMsg{err: err}
 		}
-		return historyLoadedMsg{messages: messages, fullLoad: true}
+		return historyLoadedMsg{messages: messages, fullLoad: true, sessionKey: session}
 	}
 }
 
@@ -827,6 +842,7 @@ func (a *App) switchAgent(agentID string) tea.Cmd {
 	a.currentAgent = strings.ToLower(agentID)
 	a.currentSession = fmt.Sprintf("agent:%s:main", strings.ToLower(agentID))
 	a.messages = nil
+	a.resetStreamState()
 	a.renderChat()
 	return a.loadHistory()
 }
@@ -940,6 +956,26 @@ func (a *App) ensureAssistantMessage() {
 		return
 	}
 	a.messages = append(a.messages, chatMessage{role: "assistant"})
+}
+
+// resetStreamState clears all streaming-related fields.
+func (a *App) resetStreamState() {
+	a.streaming = false
+	a.currentRun = ""
+	a.receivedChatEvent = false
+	a.lastCompletedRun = ""
+	a.assembler.Reset()
+	a.statusMsg = ""
+	a.thinkingMsgIdx = 0
+	a.thinkingTicks = 0
+}
+
+// closeDebugLog closes the debug log file if open.
+func (a *App) closeDebugLog() {
+	if a.debugLog != nil {
+		a.debugLog.Close()
+		a.debugLog = nil
+	}
 }
 
 func dimStyle() lipgloss.Style {

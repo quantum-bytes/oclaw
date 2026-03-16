@@ -168,21 +168,30 @@ func (c *Client) connectOnce(ctx context.Context) error {
 	c.reconnectBackoff = time.Second // Reset backoff on success
 	c.setConnected(true)
 
+	// Per-connection context: cancelled when this connection's readLoop exits.
+	connCtx, connCancel := context.WithCancel(ctx)
+
 	// Run read loop and tick watchdog
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- c.readLoop(ctx)
+		err := c.readLoop(ctx)
+		connCancel() // cancel tick watchdog for this connection
+		c.clearPending()
+		errCh <- err
 	}()
 
-	go c.tickWatchdog(ctx)
+	go c.tickWatchdog(connCtx)
 
 	select {
 	case err := <-errCh:
+		connCancel()
 		return err
 	case <-ctx.Done():
+		connCancel()
 		conn.Close()
 		return ctx.Err()
 	case <-c.closeCh:
+		connCancel()
 		conn.Close()
 		return nil
 	}
@@ -573,6 +582,23 @@ func (c *Client) ResetSession(key, reason string) error {
 	return nil
 }
 
+// clearPending sends an error response to all in-flight requests and clears the map.
+func (c *Client) clearPending() {
+	c.pendMu.Lock()
+	for id, ch := range c.pending {
+		ch <- &ResponseFrame{
+			ID: id,
+			OK: false,
+			Error: &RPCError{
+				Code:    "DISCONNECTED",
+				Message: "connection lost",
+			},
+		}
+		delete(c.pending, id)
+	}
+	c.pendMu.Unlock()
+}
+
 // Close shuts down the client.
 func (c *Client) Close() {
 	c.closeMu.Lock()
@@ -589,6 +615,8 @@ func (c *Client) Close() {
 		c.conn.Close()
 	}
 	c.connMu.Unlock()
+
+	c.clearPending()
 }
 
 // deviceIdentityFile is the structure of ~/.openclaw/identity/device.json.
@@ -606,6 +634,15 @@ func loadDeviceIdentity(nonce, token string) (*DeviceInfo, error) {
 	}
 
 	path := filepath.Join(home, ".openclaw", "identity", "device.json")
+
+	// Check file permissions — warn if not owner-only
+	if info, statErr := os.Stat(path); statErr == nil {
+		perm := info.Mode().Perm()
+		if perm&0077 != 0 {
+			fmt.Fprintf(os.Stderr, "warning: %s has permissions %o, should be 0600\n", path, perm)
+		}
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,8 +59,11 @@ func Load(flagURL, flagToken, flagAgent string) (*Config, error) {
 
 	// Load from openclaw.json
 	if err := cfg.loadFromFile(); err != nil {
-		// Not fatal — may not exist
-		fmt.Fprintf(os.Stderr, "warning: could not load openclaw.json: %v\n", err)
+		if errors.Is(err, os.ErrNotExist) {
+			// Missing file is not fatal — use defaults
+		} else {
+			return nil, fmt.Errorf("load openclaw.json: %w", err)
+		}
 	}
 
 	// Env vars override
