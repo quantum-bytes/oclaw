@@ -67,6 +67,10 @@ type App struct {
 	receivedChatEvent bool      // true if we got a chat delta/final for current run
 	lastCompletedRun  string    // runId of last completed chat (dedup finals)
 	debugLog          *os.File  // debug event log
+
+	// Slash command autocomplete
+	completionIdx     int    // selected suggestion index (-1 = none)
+	lastSlashInput    string // track input changes to reset completion
 }
 
 type chatMessage struct {
@@ -439,6 +443,48 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 
 	// Chat mode keys
 	if a.mode == viewChat {
+		// Reset completion index when input changes
+		if currentInput := a.input.Value(); currentInput != a.lastSlashInput {
+			a.completionIdx = -1
+			a.lastSlashInput = currentInput
+		}
+
+		// Slash command completion with Tab
+		if matches := a.getSlashMatches(); len(matches) > 0 {
+			switch msg.String() {
+			case "tab":
+				// Accept the current (or first) match
+				idx := a.completionIdx
+				if idx < 0 {
+					idx = 0
+				}
+				if idx < len(matches) {
+					a.input.Reset()
+					cmd := matches[idx].cmd
+					// Add trailing space so user can type args
+					a.input.SetValue(cmd + " ")
+					a.input.CursorEnd()
+					a.completionIdx = -1
+					a.lastSlashInput = a.input.Value()
+				}
+				return nil, true
+			case "up":
+				if a.completionIdx <= 0 {
+					a.completionIdx = len(matches) - 1
+				} else {
+					a.completionIdx--
+				}
+				return nil, true
+			case "down":
+				if a.completionIdx >= len(matches)-1 {
+					a.completionIdx = 0
+				} else {
+					a.completionIdx++
+				}
+				return nil, true
+			}
+		}
+
 		switch msg.String() {
 		case "pgup":
 			a.viewport.ViewUp()
@@ -465,10 +511,14 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 			if strings.HasPrefix(text, "/") {
 				cmd := a.handleSlashCommand(text)
 				a.input.Reset()
+				a.completionIdx = -1
+				a.lastSlashInput = ""
 				return cmd, true
 			}
 
 			a.input.Reset()
+			a.completionIdx = -1
+			a.lastSlashInput = ""
 			a.messages = append(a.messages, chatMessage{role: "user", text: text})
 			a.renderChat()
 			a.viewport.GotoBottom()
@@ -997,35 +1047,58 @@ var slashCommands = []slashCmd{
 	{"/quit", "Quit"},
 }
 
-// renderSlashSuggestions shows command suggestions when input starts with "/".
-func (a *App) renderSlashSuggestions() string {
+// getSlashMatches returns matching slash commands for the current input.
+func (a *App) getSlashMatches() []slashCmd {
 	text := a.input.Value()
 	if !strings.HasPrefix(text, "/") || a.mode != viewChat {
-		return ""
+		return nil
 	}
 
 	query := strings.ToLower(strings.TrimSpace(text))
+	// Don't show suggestions if input exactly matches a command (already completed)
+	for _, sc := range slashCommands {
+		if query == sc.cmd {
+			return nil
+		}
+	}
+
 	var matches []slashCmd
 	for _, sc := range slashCommands {
 		if strings.HasPrefix(sc.cmd, query) {
 			matches = append(matches, sc)
 		}
 	}
+	return matches
+}
 
+// renderSlashSuggestions shows command suggestions when input starts with "/".
+func (a *App) renderSlashSuggestions() string {
+	matches := a.getSlashMatches()
 	if len(matches) == 0 {
 		return ""
 	}
 
+	selectedStyle := lipgloss.NewStyle().
+		Foreground(accentColor).
+		Bold(true)
+
 	var parts []string
-	for _, m := range matches {
-		parts = append(parts,
-			helpKeyStyle.Render(m.cmd)+" "+helpDescStyle.Render(m.desc))
+	for i, m := range matches {
+		cmdRendered := helpKeyStyle.Render(m.cmd)
+		descRendered := helpDescStyle.Render(m.desc)
+		if i == a.completionIdx {
+			cmdRendered = selectedStyle.Render(m.cmd)
+			descRendered = selectedStyle.Render(m.desc)
+		}
+		parts = append(parts, cmdRendered+" "+descRendered)
 	}
+
+	hint := dimStyle().Render("  tab") + helpDescStyle.Render(" accept")
 
 	return lipgloss.NewStyle().
 		Foreground(dimColor).
 		Padding(0, 1).
-		Render(strings.Join(parts, "  "))
+		Render(strings.Join(parts, "  ") + hint)
 }
 
 // renderShimmer renders text with a gradient shimmer that shifts each tick.
