@@ -4,16 +4,26 @@ import (
 	"github.com/charmbracelet/glamour"
 )
 
-var mdRenderer *glamour.TermRenderer
+var (
+	mdRenderer *glamour.TermRenderer
+	mdWidth    int
+)
 
-func init() {
+// SetMarkdownWidth updates the renderer to wrap at the given width.
+func SetMarkdownWidth(width int) {
+	if width == mdWidth && mdRenderer != nil {
+		return
+	}
+	if width < 20 {
+		width = 80
+	}
+	mdWidth = width
 	var err error
 	mdRenderer, err = glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(0), // We handle wrapping ourselves
+		glamour.WithWordWrap(width-4), // leave margin for padding
 	)
 	if err != nil {
-		// Fallback to no rendering
 		mdRenderer = nil
 	}
 }

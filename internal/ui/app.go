@@ -179,6 +179,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
+		SetMarkdownWidth(a.width)
 		a.updateLayout()
 
 	case tea.KeyMsg:
