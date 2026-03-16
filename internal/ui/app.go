@@ -673,6 +673,7 @@ func (a *App) handleChatEvent(evt *gateway.EventFrame) tea.Cmd {
 	switch payload.State {
 	case "delta":
 		// Streaming content — extract and display it live
+		a.receivedChatEvent = true
 		if payload.Message != nil {
 			var msg struct {
 				Content json.RawMessage `json:"content"`
@@ -680,21 +681,16 @@ func (a *App) handleChatEvent(evt *gateway.EventFrame) tea.Cmd {
 			if json.Unmarshal(payload.Message, &msg) == nil {
 				text := chat.ExtractText(msg.Content)
 				if text != "" {
-					// Update or create the streaming assistant message
-					if len(a.messages) == 0 || a.messages[len(a.messages)-1].role != "assistant" || !a.streaming {
-						a.messages = append(a.messages, chatMessage{role: "assistant"})
-					}
+					a.ensureAssistantMessage()
 					a.messages[len(a.messages)-1].text = text
 					a.renderChat()
 					a.viewport.GotoBottom()
 				}
 			}
 		}
-		// Mark that we've received chat events (so agent end knows not to fetch)
-		a.receivedChatEvent = true
 
 	case "final":
-		// Response complete — extract final content and stop streaming
+		// Response complete
 		a.streaming = false
 		a.currentRun = ""
 		a.statusMsg = ""
@@ -708,10 +704,7 @@ func (a *App) handleChatEvent(evt *gateway.EventFrame) tea.Cmd {
 				text := chat.ExtractText(msg.Content)
 				thinking := chat.ExtractThinking(msg.Content)
 				if text != "" {
-					// Update or create the final assistant message
-					if len(a.messages) == 0 || a.messages[len(a.messages)-1].role != "assistant" {
-						a.messages = append(a.messages, chatMessage{role: "assistant"})
-					}
+					a.ensureAssistantMessage()
 					last := &a.messages[len(a.messages)-1]
 					last.text = text
 					last.thinking = thinking
@@ -929,6 +922,15 @@ func (a *App) renderChat() {
 	}
 
 	a.viewport.SetContent(sb.String())
+}
+
+// ensureAssistantMessage makes sure the last message is an assistant message.
+// If it already is, reuse it. Otherwise append a new one.
+func (a *App) ensureAssistantMessage() {
+	if len(a.messages) > 0 && a.messages[len(a.messages)-1].role == "assistant" {
+		return
+	}
+	a.messages = append(a.messages, chatMessage{role: "assistant"})
 }
 
 func dimStyle() lipgloss.Style {
