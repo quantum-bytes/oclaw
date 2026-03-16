@@ -56,10 +56,12 @@ type App struct {
 	pickerCursor   int
 
 	// Connection
-	connected    bool
-	reconnecting bool
-	statusMsg    string
-	spinnerIdx   int
+	connected      bool
+	reconnecting   bool
+	statusMsg      string
+	spinnerIdx     int
+	thinkingMsgIdx int
+	thinkingTicks  int // counts ticks to rotate message every ~30 ticks (3s)
 }
 
 type chatMessage struct {
@@ -121,6 +123,19 @@ func NewApp(cfg *config.Config) *App {
 }
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+var thinkingMessages = []string{
+	"Reasoning through the problem...",
+	"Analyzing context...",
+	"Forming a response...",
+	"Processing your request...",
+	"Exploring possibilities...",
+	"Weighing different approaches...",
+	"Connecting the dots...",
+	"Synthesizing information...",
+	"Crafting a thoughtful reply...",
+	"Deep in thought...",
+}
 
 func (a *App) Init() tea.Cmd {
 	return tea.Batch(
@@ -264,6 +279,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		if a.streaming {
 			a.spinnerIdx = (a.spinnerIdx + 1) % len(spinnerFrames)
+			a.thinkingTicks++
+			if a.thinkingTicks%30 == 0 { // rotate message every 3s
+				a.thinkingMsgIdx = (a.thinkingMsgIdx + 1) % len(thinkingMessages)
+			}
 			a.renderChat()
 		}
 		cmds = append(cmds, a.tickSpinner())
@@ -388,6 +407,8 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 			a.streaming = true
 			a.assembler.Reset()
 			a.statusMsg = ""
+			a.thinkingMsgIdx = 0
+			a.thinkingTicks = 0
 			return a.sendMessage(text), true
 		}
 	}
@@ -684,7 +705,7 @@ func (a *App) renderChat() {
 		switch msg.role {
 		case "user":
 			sb.WriteString(userLabelStyle.Render("You") + "\n")
-			sb.WriteString(WrapText(msg.text) + "\n\n")
+			sb.WriteString(userTextStyle.Render(WrapText(msg.text)) + "\n\n")
 
 		case "assistant":
 			agentName := a.currentAgent
@@ -726,7 +747,13 @@ func (a *App) renderChat() {
 			}
 		}
 		frame := spinnerFrames[a.spinnerIdx%len(spinnerFrames)]
-		sb.WriteString("\n" + spinnerStyle.Render(frame+" ") + thinkingLabelStyle.Render(agentName+" is thinking...") + "\n")
+		statusText := thinkingMessages[a.thinkingMsgIdx%len(thinkingMessages)]
+
+		// Shimmer effect: color each character with a gradient that shifts over time
+		shimmerLine := renderShimmer(statusText, a.spinnerIdx)
+		sb.WriteString("\n" + spinnerStyle.Render(frame+" ") +
+			lipgloss.NewStyle().Bold(true).Foreground(assistantColor).Render(agentName) +
+			"  " + shimmerLine + "\n")
 	}
 
 	a.viewport.SetContent(sb.String())
@@ -734,6 +761,19 @@ func (a *App) renderChat() {
 
 func dimStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(dimColor)
+}
+
+// renderShimmer renders text with a gradient shimmer that shifts each tick.
+func renderShimmer(text string, offset int) string {
+	runes := []rune(text)
+	var sb strings.Builder
+	numColors := len(shimmerColors)
+	for i, r := range runes {
+		colorIdx := (i + offset) % numColors
+		style := lipgloss.NewStyle().Foreground(shimmerColors[colorIdx])
+		sb.WriteString(style.Render(string(r)))
+	}
+	return sb.String()
 }
 
 // View

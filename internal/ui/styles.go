@@ -12,6 +12,21 @@ var (
 	userColor      = lipgloss.Color("#3B82F6") // Blue
 	assistantColor = lipgloss.Color("#8B5CF6") // Violet
 	thinkingColor  = lipgloss.Color("#6B7280") // Gray
+	chatTextColor  = lipgloss.Color("#9CA3AF") // Light gray for chat text
+
+	// Shimmer gradient colors for thinking animation
+	shimmerColors = []lipgloss.Color{
+		"#6366F1", // Indigo
+		"#8B5CF6", // Violet
+		"#A78BFA", // Light violet
+		"#C4B5FD", // Lavender
+		"#A78BFA", // Light violet
+		"#8B5CF6", // Violet
+		"#7C3AED", // Purple
+		"#6D28D9", // Deep purple
+		"#5B21B6", // Darker purple
+		"#6D28D9", // Deep purple
+	}
 
 	// Header
 	headerStyle = lipgloss.NewStyle().
@@ -46,9 +61,15 @@ var (
 			Foreground(userColor).
 			Bold(true)
 
+	userTextStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#D1D5DB")) // Brighter for user text
+
 	assistantLabelStyle = lipgloss.NewStyle().
 				Foreground(assistantColor).
 				Bold(true)
+
+	assistantTextStyle = lipgloss.NewStyle().
+				Foreground(chatTextColor)
 
 	thinkingLabelStyle = lipgloss.NewStyle().
 				Foreground(thinkingColor).
