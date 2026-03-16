@@ -23,6 +23,15 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+brews:
+  - repository:
+      owner: quantum-bytes
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/quantum-bytes/oclaw"
+    description: "Terminal UI for OpenClaw agent chat"
+    license: "MIT"
+
 changelog:
   sort: asc
   filters:
