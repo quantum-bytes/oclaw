@@ -289,10 +289,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, a.tickSpinner())
 	}
 
-	// Update textarea if in chat mode and not in overlay
+	// Update textarea and viewport if in chat mode
 	if a.mode == viewChat {
 		var cmd tea.Cmd
 		a.input, cmd = a.input.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+
+		// Forward to viewport for scroll (mouse wheel, pgup/pgdn)
+		a.viewport, cmd = a.viewport.Update(msg)
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -406,6 +412,18 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	// Chat mode keys
 	if a.mode == viewChat {
 		switch msg.String() {
+		case "pgup":
+			a.viewport.ViewUp()
+			return nil, true
+		case "pgdown":
+			a.viewport.ViewDown()
+			return nil, true
+		case "home":
+			a.viewport.GotoTop()
+			return nil, true
+		case "end":
+			a.viewport.GotoBottom()
+			return nil, true
 		case "enter":
 			if a.streaming {
 				return nil, true
