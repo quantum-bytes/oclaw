@@ -572,30 +572,29 @@ func (a *App) handleAgentEvent(evt *gateway.EventFrame) tea.Cmd {
 		return nil
 	}
 
-	// Only handle events for our current session
 	if payload.SessionKey != a.currentSession {
 		return nil
 	}
 
-	// Only handle lifecycle events
-	if payload.Stream != "lifecycle" {
-		return nil
-	}
-
-	switch payload.Data.Phase {
-	case "start":
-		a.currentRun = payload.RunID
-		a.streaming = true
-		a.statusMsg = "thinking..."
-		a.renderChat()
-		a.viewport.GotoBottom()
-
-	case "end":
-		// Agent finished — fetch the response from history
-		a.streaming = false
-		a.currentRun = ""
-		a.statusMsg = ""
-		return a.fetchLatestResponse()
+	switch payload.Stream {
+	case "lifecycle":
+		if payload.Data.Phase == "start" {
+			a.currentRun = payload.RunID
+			a.streaming = true
+			a.statusMsg = "thinking..."
+			a.renderChat()
+			a.viewport.GotoBottom()
+		}
+		// Don't handle "end" here — wait for chat "final" event instead
+	case "assistant":
+		// Streaming text delta from agent — update status to show activity
+		if a.streaming {
+			a.statusMsg = "responding..."
+		}
+	case "thinking":
+		if a.streaming {
+			a.statusMsg = "reasoning..."
+		}
 	}
 
 	return nil
@@ -603,9 +602,10 @@ func (a *App) handleAgentEvent(evt *gateway.EventFrame) tea.Cmd {
 
 func (a *App) handleChatEvent(evt *gateway.EventFrame) tea.Cmd {
 	var payload struct {
-		SessionKey string `json:"sessionKey"`
-		State      string `json:"state"`
-		RunID      string `json:"runId"`
+		SessionKey string          `json:"sessionKey"`
+		State      string          `json:"state"`
+		RunID      string          `json:"runId"`
+		Message    json.RawMessage `json:"message,omitempty"`
 	}
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return nil
@@ -616,6 +616,58 @@ func (a *App) handleChatEvent(evt *gateway.EventFrame) tea.Cmd {
 	}
 
 	switch payload.State {
+	case "delta":
+		// Streaming content — extract and display it live
+		if payload.Message != nil {
+			var msg struct {
+				Content json.RawMessage `json:"content"`
+			}
+			if json.Unmarshal(payload.Message, &msg) == nil {
+				text := chat.ExtractText(msg.Content)
+				if text != "" {
+					// Update or create the streaming assistant message
+					if len(a.messages) == 0 || a.messages[len(a.messages)-1].role != "assistant" || !a.streaming {
+						a.messages = append(a.messages, chatMessage{role: "assistant"})
+					}
+					a.messages[len(a.messages)-1].text = text
+					a.renderChat()
+					a.viewport.GotoBottom()
+				}
+			}
+		}
+
+	case "final":
+		// Response complete — extract final content and stop streaming
+		a.streaming = false
+		a.currentRun = ""
+		a.statusMsg = ""
+
+		if payload.Message != nil {
+			var msg struct {
+				Content json.RawMessage `json:"content"`
+			}
+			if json.Unmarshal(payload.Message, &msg) == nil {
+				text := chat.ExtractText(msg.Content)
+				thinking := chat.ExtractThinking(msg.Content)
+				if text != "" {
+					// Update or create the final assistant message
+					if len(a.messages) == 0 || a.messages[len(a.messages)-1].role != "assistant" {
+						a.messages = append(a.messages, chatMessage{role: "assistant"})
+					}
+					last := &a.messages[len(a.messages)-1]
+					last.text = text
+					last.thinking = thinking
+					last.tools = chat.ExtractToolCalls(msg.Content)
+					a.renderChat()
+					a.viewport.GotoBottom()
+					return nil
+				}
+			}
+		}
+
+		// If final had no message content, fetch from history
+		return a.fetchLatestResponse()
+
 	case "error":
 		a.streaming = false
 		a.currentRun = ""
