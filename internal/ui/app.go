@@ -618,6 +618,8 @@ func (a *App) handleAgentEvent(evt *gateway.EventFrame) tea.Cmd {
 				a.streaming = false
 				a.currentRun = ""
 				a.statusMsg = ""
+				a.receivedChatEvent = true // prevent chat final from also fetching
+				a.lastCompletedRun = payload.RunID
 				return a.fetchLatestResponse()
 			}
 		}
