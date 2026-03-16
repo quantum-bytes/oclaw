@@ -232,7 +232,7 @@ func (c *Client) sendConnect(nonce string) (*HelloPayload, error) {
 			"token": c.token,
 		},
 		Role:   "operator",
-		Scopes: []string{"operator.admin"},
+		Scopes: []string{"operator.admin", "operator.read", "operator.write"},
 	}
 
 	// Send connect request directly (readLoop not running yet)
