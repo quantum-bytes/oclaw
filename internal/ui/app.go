@@ -684,7 +684,7 @@ func (a *App) renderChat() {
 		switch msg.role {
 		case "user":
 			sb.WriteString(userLabelStyle.Render("You") + "\n")
-			sb.WriteString(msg.text + "\n\n")
+			sb.WriteString(WrapText(msg.text) + "\n\n")
 
 		case "assistant":
 			agentName := a.currentAgent
@@ -697,7 +697,7 @@ func (a *App) renderChat() {
 
 			if a.showThink && msg.thinking != "" {
 				sb.WriteString(thinkingLabelStyle.Render(agentName+" (thinking)") + "\n")
-				sb.WriteString(thinkingTextStyle.Render(msg.thinking) + "\n\n")
+				sb.WriteString(thinkingTextStyle.Render(WrapText(msg.thinking)) + "\n\n")
 			}
 
 			if len(msg.tools) > 0 {
