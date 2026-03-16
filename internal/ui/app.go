@@ -112,7 +112,7 @@ func NewApp(cfg *config.Config) *App {
 		viewport:       vp,
 		input:          ta,
 		assembler:      chat.NewStreamAssembler(),
-		showThink:      true,
+		showThink:      false,
 		currentAgent:   cfg.AgentID,
 		currentSession: fmt.Sprintf("agent:%s:main", cfg.AgentID),
 	}

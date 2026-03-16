@@ -17,6 +17,8 @@ var (
 	ansiRe     = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	listItemRe = regexp.MustCompile(`^\d+\.\s`)
 	bulletRe   = regexp.MustCompile(`^[•\-\*]\s`)
+	// Match URLs in plain text (not already inside an OSC 8 sequence)
+	urlRe = regexp.MustCompile(`(https?://[^\s\)>\]]+|file://[^\s\)>\]]+)`)
 )
 
 func init() {
@@ -95,6 +97,7 @@ func RenderMarkdown(text string) string {
 	rendered = strings.TrimRight(rendered, "\n")
 	rendered = fixListIndentation(rendered)
 	rendered = compactBlankLines(rendered)
+	rendered = makeHyperlinks(rendered)
 	return rendered
 }
 
@@ -151,11 +154,23 @@ func compactBlankLines(text string) string {
 	return re.ReplaceAllString(text, "\n\n")
 }
 
+// makeHyperlinks converts URLs into clickable OSC 8 terminal hyperlinks.
+// Format: \x1b]8;;URL\x07DISPLAY_TEXT\x1b]8;;\x07
+func makeHyperlinks(text string) string {
+	return urlRe.ReplaceAllStringFunc(text, func(url string) string {
+		// Strip any trailing ANSI codes that got captured
+		cleanURL := ansiRe.ReplaceAllString(url, "")
+		// OSC 8 hyperlink: clickable in iTerm2, Kitty, WezTerm, GNOME Terminal, etc.
+		return "\x1b]8;;" + cleanURL + "\x07" + url + "\x1b]8;;\x07"
+	})
+}
+
 // WrapText wraps plain text to the current width.
 func WrapText(text string) string {
 	w := mdWidth
 	if w <= 0 {
 		w = 80
 	}
-	return wordwrap.String(text, w-6)
+	wrapped := wordwrap.String(text, w-6)
+	return makeHyperlinks(wrapped)
 }
