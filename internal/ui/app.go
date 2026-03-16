@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -59,11 +60,12 @@ type App struct {
 	connected      bool
 	reconnecting   bool
 	statusMsg      string
-	spinnerIdx       int
-	thinkingMsgIdx   int
-	thinkingTicks    int       // counts ticks to rotate message every ~30 ticks (3s)
-	lastCtrlC        time.Time // for double ctrl+c to quit
-	receivedChatEvent bool     // true if we got a chat delta/final for current run
+	spinnerIdx        int
+	thinkingMsgIdx    int
+	thinkingTicks     int       // counts ticks to rotate message every ~30 ticks (3s)
+	lastCtrlC         time.Time // for double ctrl+c to quit
+	receivedChatEvent bool      // true if we got a chat delta/final for current run
+	debugLog          *os.File  // debug event log
 }
 
 type chatMessage struct {
@@ -114,14 +116,26 @@ func NewApp(cfg *config.Config) *App {
 		input:          ta,
 		assembler:      chat.NewStreamAssembler(),
 		showThink:      false,
-		currentAgent:   cfg.AgentID,
-		currentSession: fmt.Sprintf("agent:%s:main", cfg.AgentID),
+		currentAgent:   strings.ToLower(cfg.AgentID),
+		currentSession: fmt.Sprintf("agent:%s:main", strings.ToLower(cfg.AgentID)),
 	}
 
 	client.OnConnect(func() {})
 	client.OnDisconnect(func() {})
 
+	// Debug log
+	if f, err := os.Create("/tmp/oclaw-debug.log"); err == nil {
+		app.debugLog = f
+	}
+
 	return app
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -547,6 +561,13 @@ func (a *App) handleSessionPickerKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (a *App) handleEvent(evt *gateway.EventFrame) tea.Cmd {
+	// Log all events to debug file
+	if a.debugLog != nil {
+		fmt.Fprintf(a.debugLog, "[%s] event=%s payload=%s\n",
+			time.Now().Format("15:04:05.000"), evt.Event,
+			truncate(string(evt.Payload), 300))
+	}
+
 	switch evt.Event {
 	case "agent":
 		return a.handleAgentEvent(evt)
@@ -637,7 +658,15 @@ func (a *App) handleChatEvent(evt *gateway.EventFrame) tea.Cmd {
 		return nil
 	}
 
+	if a.debugLog != nil {
+		fmt.Fprintf(a.debugLog, "  CHAT state=%s session=%s (current=%s) streaming=%v receivedChat=%v\n",
+			payload.State, payload.SessionKey, a.currentSession, a.streaming, a.receivedChatEvent)
+	}
+
 	if payload.SessionKey != a.currentSession {
+		if a.debugLog != nil {
+			fmt.Fprintf(a.debugLog, "  SKIPPED: session mismatch\n")
+		}
 		return nil
 	}
 
@@ -793,8 +822,8 @@ func (a *App) loadSessions() tea.Cmd {
 }
 
 func (a *App) switchAgent(agentID string) tea.Cmd {
-	a.currentAgent = agentID
-	a.currentSession = fmt.Sprintf("agent:%s:main", agentID)
+	a.currentAgent = strings.ToLower(agentID)
+	a.currentSession = fmt.Sprintf("agent:%s:main", strings.ToLower(agentID))
 	a.messages = nil
 	a.renderChat()
 	return a.loadHistory()
