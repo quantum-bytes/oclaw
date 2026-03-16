@@ -59,10 +59,11 @@ type App struct {
 	connected      bool
 	reconnecting   bool
 	statusMsg      string
-	spinnerIdx     int
-	thinkingMsgIdx int
-	thinkingTicks  int       // counts ticks to rotate message every ~30 ticks (3s)
-	lastCtrlC      time.Time // for double ctrl+c to quit
+	spinnerIdx       int
+	thinkingMsgIdx   int
+	thinkingTicks    int       // counts ticks to rotate message every ~30 ticks (3s)
+	lastCtrlC        time.Time // for double ctrl+c to quit
+	receivedChatEvent bool     // true if we got a chat delta/final for current run
 }
 
 type chatMessage struct {
@@ -449,6 +450,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 			a.statusMsg = ""
 			a.thinkingMsgIdx = 0
 			a.thinkingTicks = 0
+			a.receivedChatEvent = false
 			return a.sendMessage(text), true
 		}
 	}
@@ -578,22 +580,46 @@ func (a *App) handleAgentEvent(evt *gateway.EventFrame) tea.Cmd {
 
 	switch payload.Stream {
 	case "lifecycle":
-		if payload.Data.Phase == "start" {
+		switch payload.Data.Phase {
+		case "start":
 			a.currentRun = payload.RunID
 			a.streaming = true
+			a.receivedChatEvent = false
 			a.statusMsg = "thinking..."
 			a.renderChat()
 			a.viewport.GotoBottom()
+		case "end":
+			// Only fetch history if we never got chat events (Gemini/models
+			// that don't stream). If we DID get chat events, the chat "final"
+			// handler will complete the response.
+			if a.streaming && !a.receivedChatEvent {
+				a.streaming = false
+				a.currentRun = ""
+				a.statusMsg = ""
+				return a.fetchLatestResponse()
+			}
 		}
-		// Don't handle "end" here — wait for chat "final" event instead
 	case "assistant":
-		// Streaming text delta from agent — update status to show activity
 		if a.streaming {
 			a.statusMsg = "responding..."
 		}
 	case "thinking":
 		if a.streaming {
 			a.statusMsg = "reasoning..."
+		}
+	case "tool":
+		if a.streaming {
+			// Extract tool name if available
+			var toolData struct {
+				Data struct {
+					Name string `json:"name"`
+				} `json:"data"`
+			}
+			if json.Unmarshal(evt.Payload, &toolData) == nil && toolData.Data.Name != "" {
+				a.statusMsg = "using " + toolData.Data.Name + "..."
+			} else {
+				a.statusMsg = "using tools..."
+			}
 		}
 	}
 
@@ -635,12 +661,15 @@ func (a *App) handleChatEvent(evt *gateway.EventFrame) tea.Cmd {
 				}
 			}
 		}
+		// Mark that we've received chat events (so agent end knows not to fetch)
+		a.receivedChatEvent = true
 
 	case "final":
 		// Response complete — extract final content and stop streaming
 		a.streaming = false
 		a.currentRun = ""
 		a.statusMsg = ""
+		a.receivedChatEvent = true
 
 		if payload.Message != nil {
 			var msg struct {
