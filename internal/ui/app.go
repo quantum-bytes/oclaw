@@ -946,6 +946,52 @@ func dimStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(dimColor)
 }
 
+type slashCmd struct {
+	cmd  string
+	desc string
+}
+
+var slashCommands = []slashCmd{
+	{"/agent", "Switch agent"},
+	{"/session", "Browse sessions"},
+	{"/new", "New session"},
+	{"/save", "Save memory"},
+	{"/think", "Set thinking level"},
+	{"/help", "Show help"},
+	{"/quit", "Quit"},
+}
+
+// renderSlashSuggestions shows command suggestions when input starts with "/".
+func (a *App) renderSlashSuggestions() string {
+	text := a.input.Value()
+	if !strings.HasPrefix(text, "/") || a.mode != viewChat {
+		return ""
+	}
+
+	query := strings.ToLower(strings.TrimSpace(text))
+	var matches []slashCmd
+	for _, sc := range slashCommands {
+		if strings.HasPrefix(sc.cmd, query) {
+			matches = append(matches, sc)
+		}
+	}
+
+	if len(matches) == 0 {
+		return ""
+	}
+
+	var parts []string
+	for _, m := range matches {
+		parts = append(parts,
+			helpKeyStyle.Render(m.cmd)+" "+helpDescStyle.Render(m.desc))
+	}
+
+	return lipgloss.NewStyle().
+		Foreground(dimColor).
+		Padding(0, 1).
+		Render(strings.Join(parts, "  "))
+}
+
 // renderShimmer renders text with a gradient shimmer that shifts each tick.
 func renderShimmer(text string, offset int) string {
 	runes := []rune(text)
@@ -982,6 +1028,9 @@ func (a *App) View() string {
 		content = a.viewport.View()
 	}
 
+	// Slash command suggestions
+	suggestions := a.renderSlashSuggestions()
+
 	inputBorder := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder(), true, false, false, false).
 		BorderForeground(dimColor).
@@ -990,6 +1039,7 @@ func (a *App) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
 		header,
 		content,
+		suggestions,
 		inputBorder.Render(a.input.View()),
 		status,
 	)
