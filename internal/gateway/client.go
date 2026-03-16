@@ -27,6 +27,7 @@ type Client struct {
 
 	conn     *websocket.Conn
 	connMu   sync.Mutex
+	writeMu  sync.Mutex // serializes all writes to the websocket
 	pending  map[string]chan *ResponseFrame
 	pendMu   sync.Mutex
 	eventCh  chan *EventFrame
@@ -251,8 +252,11 @@ func (c *Client) sendConnect(nonce string) (*HelloPayload, error) {
 	conn := c.conn
 	c.connMu.Unlock()
 
-	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		return nil, fmt.Errorf("write connect: %w", err)
+	c.writeMu.Lock()
+	writeErr := conn.WriteMessage(websocket.TextMessage, data)
+	c.writeMu.Unlock()
+	if writeErr != nil {
+		return nil, fmt.Errorf("write connect: %w", writeErr)
 	}
 
 	// Read response directly
@@ -409,11 +413,14 @@ func (c *Client) Request(method string, params interface{}) (*ResponseFrame, err
 		return nil, fmt.Errorf("not connected")
 	}
 
-	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+	c.writeMu.Lock()
+	writeErr := conn.WriteMessage(websocket.TextMessage, data)
+	c.writeMu.Unlock()
+	if writeErr != nil {
 		c.pendMu.Lock()
 		delete(c.pending, id)
 		c.pendMu.Unlock()
-		return nil, fmt.Errorf("write: %w", err)
+		return nil, fmt.Errorf("write: %w", writeErr)
 	}
 
 	select {

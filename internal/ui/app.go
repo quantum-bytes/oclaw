@@ -59,6 +59,7 @@ type App struct {
 	connected    bool
 	reconnecting bool
 	statusMsg    string
+	spinnerIdx   int
 }
 
 type chatMessage struct {
@@ -73,11 +74,15 @@ type gatewayConnectedMsg struct{}
 type gatewayDisconnectedMsg struct{}
 type gatewayEventMsg struct{ event *gateway.EventFrame }
 type agentsLoadedMsg struct{ agents []gateway.AgentInfo }
-type historyLoadedMsg struct{ messages []gateway.HistoryMessage }
+type historyLoadedMsg struct {
+	messages []gateway.HistoryMessage
+	fullLoad bool // true = replace all messages, false = append latest response
+}
 type sessionsLoadedMsg struct{ sessions []gateway.SessionInfo }
 type chatSentMsg struct{ err error }
 type sessionResetMsg struct{ err error }
 type errMsg struct{ err error }
+type tickMsg struct{} // periodic UI refresh for spinner
 
 // NewApp creates a new App model.
 func NewApp(cfg *config.Config) *App {
@@ -115,11 +120,20 @@ func NewApp(cfg *config.Config) *App {
 	return app
 }
 
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 func (a *App) Init() tea.Cmd {
 	return tea.Batch(
 		textarea.Blink,
 		a.connectGateway(),
+		a.tickSpinner(),
 	)
+}
+
+func (a *App) tickSpinner() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg{}
+	})
 }
 
 func (a *App) connectGateway() tea.Cmd {
@@ -168,9 +182,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.updateLayout()
 
 	case tea.KeyMsg:
-		cmd := a.handleKey(msg)
+		cmd, handled := a.handleKey(msg)
 		if cmd != nil {
 			cmds = append(cmds, cmd)
+		}
+		if handled {
+			return a, tea.Batch(cmds...)
 		}
 
 	case gatewayConnectedMsg:
@@ -195,14 +212,29 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.agents = msg.agents
 
 	case historyLoadedMsg:
-		a.messages = nil
-		for _, m := range msg.messages {
-			a.messages = append(a.messages, chatMessage{
-				role:     m.Role,
-				text:     chat.ExtractText(m.Content),
-				thinking: chat.ExtractThinking(m.Content),
-				tools:    chat.ExtractToolCalls(m.Content),
-			})
+		if msg.fullLoad {
+			// Full history load (initial connect or agent switch)
+			a.messages = nil
+			for _, m := range msg.messages {
+				a.messages = append(a.messages, chatMessage{
+					role:     m.Role,
+					text:     chat.ExtractText(m.Content),
+					thinking: chat.ExtractThinking(m.Content),
+					tools:    chat.ExtractToolCalls(m.Content),
+				})
+			}
+		} else {
+			// Response fetch — append the latest assistant message
+			for _, m := range msg.messages {
+				if m.Role == "assistant" {
+					a.messages = append(a.messages, chatMessage{
+						role:     m.Role,
+						text:     chat.ExtractText(m.Content),
+						thinking: chat.ExtractThinking(m.Content),
+						tools:    chat.ExtractToolCalls(m.Content),
+					})
+				}
+			}
 		}
 		a.renderChat()
 		a.viewport.GotoBottom()
@@ -227,6 +259,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		a.statusMsg = fmt.Sprintf("error: %v", msg.err)
+
+	case tickMsg:
+		if a.streaming {
+			a.spinnerIdx = (a.spinnerIdx + 1) % len(spinnerFrames)
+			a.renderChat()
+		}
+		cmds = append(cmds, a.tickSpinner())
 	}
 
 	// Update textarea if in chat mode and not in overlay
@@ -241,13 +280,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, tea.Batch(cmds...)
 }
 
-func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
-	// Global keys
+// handleKey processes a key event. Returns (cmd, handled).
+// When handled is true, the key should NOT be forwarded to the textarea.
+func (a *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
+	// Global keys — always handled (not forwarded to textarea)
 	switch {
 	case msg.String() == "ctrl+d":
 		a.cancel()
 		a.client.Close()
-		return tea.Quit
+		return tea.Quit, true
 
 	case msg.String() == "ctrl+c":
 		if a.streaming {
@@ -257,17 +298,17 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 			a.streaming = false
 			a.assembler.Reset()
 			a.statusMsg = "aborted"
-			return nil
+			return nil, true
 		}
 		a.cancel()
 		a.client.Close()
-		return tea.Quit
+		return tea.Quit, true
 
 	case msg.String() == "esc":
 		if a.mode != viewChat {
 			a.mode = viewChat
 			a.pickerCursor = 0
-			return nil
+			return nil, true
 		}
 
 	case msg.String() == "ctrl+a":
@@ -277,7 +318,7 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 			a.mode = viewAgentPicker
 			a.pickerCursor = 0
 		}
-		return nil
+		return nil, true
 
 	case msg.String() == "ctrl+s":
 		if a.mode == viewSessionPicker {
@@ -285,17 +326,17 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 		} else {
 			a.mode = viewSessionPicker
 			a.pickerCursor = 0
-			return a.loadSessions()
+			return a.loadSessions(), true
 		}
-		return nil
+		return nil, true
 
 	case msg.String() == "ctrl+n":
-		return a.resetSession()
+		return a.resetSession(), true
 
 	case msg.String() == "ctrl+t":
 		a.showThink = !a.showThink
 		a.renderChat()
-		return nil
+		return nil, true
 
 	case msg.String() == "ctrl+/":
 		if a.mode == viewHelp {
@@ -303,21 +344,21 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 		} else {
 			a.mode = viewHelp
 		}
-		return nil
+		return nil, true
 	}
 
-	// Overlay-specific keys
+	// Overlay-specific keys — always handled
 	if a.mode == viewAgentPicker {
-		return a.handleAgentPickerKey(msg)
+		return a.handleAgentPickerKey(msg), true
 	}
 	if a.mode == viewSessionPicker {
-		return a.handleSessionPickerKey(msg)
+		return a.handleSessionPickerKey(msg), true
 	}
 	if a.mode == viewHelp {
 		if msg.String() == "q" || msg.String() == "esc" {
 			a.mode = viewChat
 		}
-		return nil
+		return nil, true
 	}
 
 	// Chat mode keys
@@ -325,18 +366,18 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 		switch msg.String() {
 		case "enter":
 			if a.streaming {
-				return nil
+				return nil, true
 			}
 			text := strings.TrimSpace(a.input.Value())
 			if text == "" {
-				return nil
+				return nil, true
 			}
 
 			// Handle slash commands
 			if strings.HasPrefix(text, "/") {
 				cmd := a.handleSlashCommand(text)
 				a.input.Reset()
-				return cmd
+				return cmd, true
 			}
 
 			a.input.Reset()
@@ -346,11 +387,12 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 			a.streaming = true
 			a.assembler.Reset()
 			a.statusMsg = ""
-			return a.sendMessage(text)
+			return a.sendMessage(text), true
 		}
 	}
 
-	return nil
+	// Not handled — let textarea process it
+	return nil, false
 }
 
 func (a *App) handleSlashCommand(text string) tea.Cmd {
@@ -437,61 +479,108 @@ func (a *App) handleSessionPickerKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (a *App) handleEvent(evt *gateway.EventFrame) tea.Cmd {
-	if evt.Event != "chat" {
-		return nil
+	switch evt.Event {
+	case "agent":
+		return a.handleAgentEvent(evt)
+	case "chat":
+		return a.handleChatEvent(evt)
 	}
+	return nil
+}
 
-	var chatEvt chat.ChatEventPayload
-	if err := json.Unmarshal(evt.Payload, &chatEvt); err != nil {
+// agentEventPayload represents the agent lifecycle event.
+type agentEventPayload struct {
+	RunID      string `json:"runId"`
+	Stream     string `json:"stream"`
+	SessionKey string `json:"sessionKey"`
+	Data       struct {
+		Phase     string `json:"phase"` // "start", "end"
+		StartedAt int64  `json:"startedAt,omitempty"`
+		EndedAt   int64  `json:"endedAt,omitempty"`
+	} `json:"data"`
+}
+
+func (a *App) handleAgentEvent(evt *gateway.EventFrame) tea.Cmd {
+	var payload agentEventPayload
+	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return nil
 	}
 
 	// Only handle events for our current session
-	if chatEvt.SessionKey != a.currentSession {
+	if payload.SessionKey != a.currentSession {
 		return nil
 	}
 
-	delta := a.assembler.HandleEvent(chatEvt)
-	a.currentRun = delta.RunID
+	// Only handle lifecycle events
+	if payload.Stream != "lifecycle" {
+		return nil
+	}
 
-	switch delta.State {
-	case chat.StreamActive:
-		// Update streaming message
-		a.updateStreamingMessage(delta)
+	switch payload.Data.Phase {
+	case "start":
+		a.currentRun = payload.RunID
+		a.streaming = true
+		a.statusMsg = "thinking..."
 		a.renderChat()
 		a.viewport.GotoBottom()
 
-	case chat.StreamFinal:
+	case "end":
+		// Agent finished — fetch the response from history
 		a.streaming = false
-		a.updateStreamingMessage(delta)
-		a.renderChat()
-		a.viewport.GotoBottom()
 		a.currentRun = ""
-
-	case chat.StreamAborted:
-		a.streaming = false
-		a.statusMsg = "response aborted"
-		a.currentRun = ""
-
-	case chat.StreamError:
-		a.streaming = false
-		a.statusMsg = fmt.Sprintf("error: %s", delta.Error)
-		a.currentRun = ""
+		a.statusMsg = ""
+		return a.fetchLatestResponse()
 	}
 
 	return nil
 }
 
-func (a *App) updateStreamingMessage(delta chat.StreamDelta) {
-	// Find or create the assistant message being streamed
-	if len(a.messages) == 0 || a.messages[len(a.messages)-1].role != "assistant" {
-		a.messages = append(a.messages, chatMessage{role: "assistant"})
+func (a *App) handleChatEvent(evt *gateway.EventFrame) tea.Cmd {
+	var payload struct {
+		SessionKey string `json:"sessionKey"`
+		State      string `json:"state"`
+		RunID      string `json:"runId"`
+	}
+	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
+		return nil
 	}
 
-	last := &a.messages[len(a.messages)-1]
-	last.text = delta.Text
-	last.thinking = delta.Thinking
-	last.tools = delta.Tools
+	if payload.SessionKey != a.currentSession {
+		return nil
+	}
+
+	switch payload.State {
+	case "error":
+		a.streaming = false
+		a.currentRun = ""
+		var errPayload struct {
+			ErrorMessage string `json:"errorMessage"`
+		}
+		json.Unmarshal(evt.Payload, &errPayload)
+		if errPayload.ErrorMessage != "" {
+			a.statusMsg = "error: " + errPayload.ErrorMessage
+		} else {
+			a.statusMsg = "agent error"
+		}
+
+	case "aborted":
+		a.streaming = false
+		a.currentRun = ""
+		a.statusMsg = "aborted"
+	}
+
+	return nil
+}
+
+// fetchLatestResponse loads history and appends the latest assistant message.
+func (a *App) fetchLatestResponse() tea.Cmd {
+	return func() tea.Msg {
+		messages, err := a.client.LoadHistory(a.currentSession, 2)
+		if err != nil {
+			return errMsg{err: fmt.Errorf("fetch response: %w", err)}
+		}
+		return historyLoadedMsg{messages: messages}
+	}
 }
 
 // Commands
@@ -519,7 +608,7 @@ func (a *App) loadHistory() tea.Cmd {
 		if err != nil {
 			return errMsg{err: err}
 		}
-		return historyLoadedMsg{messages: messages}
+		return historyLoadedMsg{messages: messages, fullLoad: true}
 	}
 }
 
@@ -627,8 +716,16 @@ func (a *App) renderChat() {
 		}
 	}
 
-	if a.streaming && (len(a.messages) == 0 || a.messages[len(a.messages)-1].text == "") {
-		sb.WriteString(spinnerStyle.Render("⠋ ") + thinkingLabelStyle.Render("thinking...") + "\n")
+	if a.streaming {
+		agentName := a.currentAgent
+		for _, ag := range a.agents {
+			if ag.ID == a.currentAgent {
+				agentName = ag.Name
+				break
+			}
+		}
+		frame := spinnerFrames[a.spinnerIdx%len(spinnerFrames)]
+		sb.WriteString("\n" + spinnerStyle.Render(frame+" ") + thinkingLabelStyle.Render(agentName+" is thinking...") + "\n")
 	}
 
 	a.viewport.SetContent(sb.String())
