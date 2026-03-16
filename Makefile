@@ -1,4 +1,4 @@
-.PHONY: build run clean test
+.PHONY: build run clean test fmt vet lint install
 
 build:
 	go build -o oclaw .
@@ -8,6 +8,12 @@ run: build
 
 test:
 	go test ./...
+
+fmt:
+	go fmt ./...
+
+vet:
+	go vet ./...
 
 clean:
 	rm -f oclaw

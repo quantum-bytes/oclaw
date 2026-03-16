@@ -3,4 +3,14 @@ dist/
 *.exe
 *.test
 *.out
+*.prof
+*.pprof
 .DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+coverage.txt
+coverage.html
+.env*
