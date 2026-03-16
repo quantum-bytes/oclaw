@@ -484,6 +484,10 @@ func (a *App) handleSlashCommand(text string) tea.Cmd {
 		}
 		return nil
 
+	case "/save":
+		a.statusMsg = "saving memory..."
+		return a.saveMemory()
+
 	case "/quit", "/exit":
 		a.cancel()
 		a.client.Close()
@@ -642,6 +646,24 @@ func (a *App) fetchLatestResponse() tea.Cmd {
 			return errMsg{err: fmt.Errorf("fetch response: %w", err)}
 		}
 		return historyLoadedMsg{messages: messages}
+	}
+}
+
+// saveMemory asks the agent to persist conversation context to MEMORY.md.
+func (a *App) saveMemory() tea.Cmd {
+	savePrompt := `Review our conversation history and update your MEMORY.md file with any important context from this session. Include: key topics discussed, decisions made, user preferences learned, files or resources referenced, and any ongoing work context. Keep entries as concise bullet points grouped by topic. Remove stale or outdated entries. Reply with a brief summary of what you saved.`
+
+	a.messages = append(a.messages, chatMessage{role: "system", text: "Saving memory..."})
+	a.renderChat()
+	a.viewport.GotoBottom()
+	a.streaming = true
+	a.assembler.Reset()
+	a.thinkingMsgIdx = 0
+	a.thinkingTicks = 0
+
+	return func() tea.Msg {
+		_, err := a.client.SendChat(a.currentSession, savePrompt, "", 0)
+		return chatSentMsg{err: err}
 	}
 }
 
@@ -1011,6 +1033,7 @@ func (a *App) renderHelp() string {
 		{"/agent <id>", "Switch to agent"},
 		{"/session", "Browse sessions"},
 		{"/new", "Reset session"},
+		{"/save", "Save memory to disk"},
 		{"/think <level>", "Set thinking level"},
 		{"/help", "Show help"},
 		{"/quit", "Quit"},
