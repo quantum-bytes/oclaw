@@ -24,7 +24,8 @@ checksum:
   name_template: "checksums.txt"
 
 brews:
-  - repository:
+  - skip_upload: "{{ if .Env.HOMEBREW_TAP_TOKEN }}false{{ else }}true{{ end }}"
+    repository:
       owner: quantum-bytes
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
