@@ -47,9 +47,9 @@ bypassing the buggy built-in TUI.`,
 }
 
 func init() {
-	rootCmd.Flags().StringVar(&flagURL, "url", "", "Gateway WebSocket URL (default: from config or ws://127.0.0.1:39421)")
-	rootCmd.Flags().StringVar(&flagToken, "token", "", "Gateway auth token (default: from config)")
-	rootCmd.Flags().StringVar(&flagAgent, "agent", "", "Default agent ID to connect to")
+	rootCmd.PersistentFlags().StringVar(&flagURL, "url", "", "Gateway WebSocket URL (default: from config or ws://127.0.0.1:39421)")
+	rootCmd.PersistentFlags().StringVar(&flagToken, "token", "", "Gateway auth token (default: from config)")
+	rootCmd.PersistentFlags().StringVar(&flagAgent, "agent", "", "Default agent ID to connect to")
 }
 
 func Execute() {
