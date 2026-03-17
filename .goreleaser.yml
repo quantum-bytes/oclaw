@@ -26,7 +26,8 @@ checksum:
 brews:
   - repository:
       owner: quantum-bytes
-      name: homebrew-oclaw
+      name: oclaw
+    directory: Formula
     homepage: "https://github.com/quantum-bytes/oclaw"
     description: "Terminal UI for OpenClaw agent chat"
     license: "MIT"
