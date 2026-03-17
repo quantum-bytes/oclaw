@@ -4,6 +4,8 @@ A terminal UI for [OpenClaw](https://github.com/openclaw/openclaw) — interacti
 
 Built because the built-in `openclaw tui` is broken. `oclaw` connects directly to the gateway WebSocket with Ed25519 device signing, giving you a fast, reliable, interactive chat experience that doesn't time out.
 
+![oclaw demo](demo.gif)
+
 ## Features
 
 - **Interactive chat** — persistent sessions, no timeouts
