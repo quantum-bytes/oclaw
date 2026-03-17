@@ -25,6 +25,15 @@ Built because the built-in `openclaw tui` is broken. `oclaw` connects directly t
 
 ## Install
 
+### Homebrew
+
+```bash
+brew tap quantum-bytes/oclaw
+brew install oclaw
+```
+
+### Go
+
 ```bash
 go install github.com/quantum-bytes/oclaw@latest
 ```
