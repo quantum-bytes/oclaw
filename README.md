@@ -2,7 +2,7 @@
 
 A terminal UI for [OpenClaw](https://github.com/openclaw/openclaw) — interactive agent chat with streaming, session persistence, and multi-agent switching.
 
-`oclaw` connects directly to the gateway WebSocket with Ed25519 device signing, giving you a fast, reliable, interactive chat experience that doesn't time out.
+`oclaw` connects directly to the gateway WebSocket with device signing, giving you a fast, reliable, interactive chat experience that doesn't time out.
 
 ![oclaw demo](demo.gif)
 
